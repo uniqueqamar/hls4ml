@@ -857,3 +857,59 @@ def test_qseparableconv2d(test_case_id, backend, io_type):
     y_hls4ml = hls_model.predict(dataq)
 
     np.testing.assert_allclose(y_qkeras, y_hls4ml.reshape(y_qkeras.shape), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('rnn_type', ['QSimpleRNN', 'QLSTM', 'QGRU'])
+def test_qrnn_weights_use_their_own_quantizers(test_case_id, rnn_type):
+    """QKeras recurrent weights must be quantized before HLS code generation."""
+    layer_class = {'QSimpleRNN': QSimpleRNN, 'QLSTM': QLSTM, 'QGRU': QGRU}[rnn_type]
+    kwargs = {
+        'kernel_quantizer': 'quantized_bits(8, 0, alpha=1)',
+        'recurrent_quantizer': 'quantized_bits(6, 0, alpha=1)',
+        'bias_quantizer': 'quantized_bits(5, 0, alpha=1)',
+        'activation': 'relu' if rnn_type == 'QSimpleRNN' else 'tanh',
+        'name': 'quantized_rnn',
+    }
+    if rnn_type != 'QSimpleRNN':
+        kwargs['recurrent_activation'] = 'sigmoid'
+    if rnn_type == 'QGRU':
+        kwargs['reset_after'] = True
+
+    model = Sequential([Input(shape=(4, 3)), layer_class(4, **kwargs)])
+    rnn = model.layers[-1]
+    rnn.set_weights([
+        np.linspace(-0.45, 0.45, num=weights.size).reshape(weights.shape)
+        for weights in rnn.get_weights()
+    ])
+
+    config = hls4ml.utils.config_from_keras_model(model, granularity='name', backend='Altera')
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        model, hls_config=config, backend='Altera', output_dir=str(test_root_path / test_case_id)
+    )
+    hls_layer = hls_model.graph['quantized_rnn']
+    quantizer_names = {
+        'weight': 'weight_quantizer',
+        'recurrent_weight': 'recurrent_weight_quantizer',
+        'bias': 'bias_quantizer',
+    }
+    if rnn_type == 'QGRU':
+        quantizer_names['recurrent_bias'] = 'bias_quantizer'
+
+    for weight_name, quantizer_name in quantizer_names.items():
+        weight = hls_layer.weights[weight_name]
+        quantizer = hls_layer.get_attr(quantizer_name)
+        assert quantizer is not None
+        np.testing.assert_allclose(weight.data, quantizer(weight.data_unquantized), rtol=0, atol=0)
+        assert np.any(weight.data != weight.data_unquantized), weight_name
+
+    if rnn_type == 'QLSTM':
+        for gate in 'ifco':
+            for weight_name, quantizer_name in (
+                (f'recurrent_weight_{gate}', 'recurrent_weight_quantizer'),
+                (f'bias_{gate}', 'bias_quantizer'),
+            ):
+                weight = hls_layer.weights[weight_name]
+                quantizer = hls_layer.get_attr(quantizer_name)
+                np.testing.assert_allclose(
+                    weight.data, quantizer(weight.data_unquantized), rtol=0, atol=0
+                )
