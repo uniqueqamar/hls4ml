@@ -886,7 +886,8 @@ def test_qrnn_weights_use_their_own_quantizers(test_case_id, rnn_type):
     hls_model = hls4ml.converters.convert_from_keras_model(
         model, hls_config=config, backend='Altera', output_dir=str(test_root_path / test_case_id)
     )
-    hls_layer = hls_model.graph['quantized_rnn']
+    # QKeras v3 recurrent layers may ignore the name passed at construction.
+    hls_layer = hls_model.graph[rnn.name]
     quantizer_names = {
         'weight': 'weight_quantizer',
         'recurrent_weight': 'recurrent_weight_quantizer',
